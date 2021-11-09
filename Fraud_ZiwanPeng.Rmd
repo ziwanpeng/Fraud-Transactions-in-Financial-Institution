@@ -1,0 +1,572 @@
+---
+title: "ZiwanPeng_fraud"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+0.load library
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(glmnet)     # -- lasso and regularization 
+library(rpart.plot) # -- plotting decision trees 
+library(vip)   
+library(reshape2)
+library(lubridate)
+```
+
+1.read csv
+```{r}
+fraud <- read_csv("project_2_training.csv") %>%
+  clean_names()
+fraud
+```
+
+```{r}
+fraud%>%
+  skim()
+```
+
+```{r}
+fraud <- fraud%>%
+  mutate(event_label=as.factor(if_else(event_label=='fraud',1,0)))%>%
+  mutate(year=year(event_timestamp),quarter=quarters(event_timestamp),month=month(event_timestamp),day=day(event_timestamp),weekday=weekdays(event_timestamp),hour=hour(event_timestamp))%>%
+  mutate_if(is.character,as.factor)%>%
+  mutate(across(.cols = c("month","year","day","quarter",'weekday','hour','billing_postal','event_id','card_bin'),as.factor))
+  
+```
+
+
+
+```{r}
+fraud %>%
+  count(event_label)%>%
+  mutate(pct=round(n/sum(n),4))
+
+
+fraud %>%
+  count(event_label)%>%
+  mutate(pct = round(n/sum(n),4))%>%
+  ggplot(aes(x=event_label,y=pct))+
+  geom_col()+
+  geom_text(aes(label=pct) ,color="red") + 
+  labs(title = "Percentage of Fraud")
+```
+
+```{r}
+fraud %>%
+  skim()
+```
+
+###explore categorical variables
+
+```{r}
+fraud%>%
+  group_by(event_label)%>%
+  count(currency)%>%
+  pivot_wider(values_from=c(n), names_from = event_label) %>%
+  mutate(pct_1 = `1`/ (`0` + `1`),
+             pct_0 = 1 - pct_1) 
+```
+
+1. find the percentage of fraud and non-fraud in email domain
+2. filter the email domains that have pct_1 > 0.5
+3. detect those suspicious email domains in all data set, define other email domains( whose pct_1 <0.5) as 'other'
+```{r}
+fraud%>%
+  group_by(event_label)%>%
+  count(email_domain)%>%
+  pivot_wider(values_from=c(n), names_from = event_label) %>%
+  mutate(pct_1 = `1`/ (`0` + `1`),
+             pct_0 = 1 - pct_1) %>%
+  filter(pct_1>0.5)%>%
+  arrange(desc(pct_1))%>%
+  mutate(email=email_domain)%>%
+  select(email_domain,email)-> list_email
+
+
+fraud<- left_join(fraud,list_email,by="email_domain")%>%
+  mutate(email=as.character(email))%>%
+  mutate(email=if_else(is.na(email),"other",email))%>%
+  mutate(email=as.factor(email))
+
+```
+```{r}
+fraud%>%
+  group_by(event_label)%>%
+  count(email)%>%
+  ggplot(aes(x=email,y=n, fill=event_label))+
+  geom_col(position="fill")+
+  geom_hline(aes(yintercept=0.0543))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(title="The suspicious email domains")
+```
+
+the suspicious billing postal code
+```{r}
+fraud%>%
+  group_by(event_label)%>%
+  count(billing_postal)%>%
+  pivot_wider(values_from=c(n), names_from = event_label) %>%
+  mutate(pct_1 = `1`/ (`0` + `1`),
+             pct_0 = 1 - pct_1)%>%
+  filter(pct_1>0.5)%>%
+  mutate(billing_postal_code=billing_postal)%>%
+  select(billing_postal_code,billing_postal)-> list_postal
+
+
+fraud<- left_join(fraud,list_postal,by="billing_postal")%>%
+  mutate(billing_postal_code=as.character(billing_postal_code))%>%
+  mutate(billing_postal_code=if_else(is.na(billing_postal_code),"other",billing_postal_code))%>%
+  mutate(billing_postal_code=as.factor(billing_postal_code))
+```
+
+
+```{r}
+fraud%>%
+  group_by(event_label)%>%
+  count(billing_postal_code)%>%
+  ggplot(aes(x=billing_postal_code,y=n, fill=event_label))+
+  geom_col(position="fill")+
+  geom_hline(aes(yintercept=0.0543))+
+  labs(title="The suspicious billing postal code")
+```
+```{r}
+fraud%>%
+  group_by(event_label)%>%
+  count(ip_address)%>%
+  pivot_wider(values_from=c(n), names_from = event_label) %>%
+  mutate(pct_1 = `1`/ (`0` + `1`),
+             pct_0 = 1 - pct_1)%>%
+  filter(pct_1>0.5)%>%
+  mutate(ip=ip_address)%>%
+  select(ip,ip_address)-> list_ip
+
+
+fraud<- left_join(fraud,list_ip,by="ip_address")%>%
+  mutate(ip=as.character(ip))%>%
+  mutate(ip=if_else(is.na(ip),"other",ip))%>%
+  mutate(ip=as.factor(ip))
+```
+
+```{r}
+fraud%>%
+  group_by(event_label)%>%
+  count(ip)%>%
+  ggplot(aes(x=ip,y=n, fill=event_label))+
+  geom_col(position="fill")+
+  geom_hline(aes(yintercept=0.0543))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(title="The suspicious ip address")
+```
+
+
+```{r}
+
+fac_v <- function(col){
+  fraud%>%
+  na.omit()%>%
+  ggplot(aes(x=!!as.name(col),fill=event_label))+
+  geom_bar(position = "fill")+
+  geom_hline(aes(yintercept=0.0543))
+}
+
+fac_v('billing_state')
+fac_v('currency')+labs(title="Fraud rate among currency")
+fac_v("cvv")+labs(title="Fraud rate among CVV")
+fac_v("signature_image")+labs(title="Fraud rate among signature image")
+fac_v("transaction_type")
+fac_v("transaction_env")+labs(title="Fraud rate in transaction environment")
+fac_v("tranaction_initiate")+labs(title="Fraud rate in type of transaction initiation")
+fac_v("year")
+fac_v("quarter")
+fac_v("month")
+fac_v("day")
+fac_v("weekday")+labs(title="Fraud rate in weekdays")
+fac_v("hour")
+
+```
+
+###explore numeric variables
+```{r}
+
+num_v <- function(col){
+  fraud%>%
+  na.omit()%>%
+  ggplot(aes(x=!!as.name(col),fill=event_label))+
+  geom_histogram(bins=20,position = "fill")+
+  geom_hline(aes(yintercept=0.0543))
+}
+
+for (col in colnames(fraud %>% select_if(is.numeric))){
+ print(num_v(col))
+ } 
+
+num_v("transaction_adj_amt")+labs(title="Relationship between fraud rate and adjusted transaction amount")
+num_v("inital_amount")+labs(title="Relationship between fraud rate and amount of first transaction")
+num_v("account_age_days")+labs(title="Relationship between fraud rate and number of days since the account created")
+```
+
+###spliting
+```{r}
+set.seed(123)
+
+train_test_spit<- initial_split(fraud, prop = 0.8, strata = event_label)
+
+train <- training(train_test_spit)
+test  <- testing(train_test_spit)
+
+sprintf("Train PCT : %1.2f%%", nrow(train)/ nrow(fraud) * 100)
+sprintf("Test  PCT : %1.2f%%", nrow(test)/ nrow(fraud) * 100)
+```
+
+###recipe
+```{r}
+
+fraud_recipe <- recipe(event_label ~ ., 
+                      data = train) %>%
+  step_rm(ip_address,user_agent,email_domain,phone_number,billing_city,billing_postal,
+          card_bin,applicant_name,billing_address,merchant_id,locale,tranaction_initiate,
+          year,quarter,month,day,weekday,hour,event_timestamp,days_since_last_logon,inital_amount)%>%
+  update_role(event_id, new_role = "id variable")%>%
+  step_novel(all_nominal_predictors()) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+```
+### logistic regression
+```{r}
+lg1<- logistic_reg(penalty = 0.001, mixture = 1) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+logistic_wf <- workflow() %>%
+  add_recipe(fraud_recipe) %>%
+  add_model(lg1) %>%
+  fit(train)
+
+```
+
+
+```{r}
+logistic_wf %>%
+  pull_workflow_fit() %>%
+  tidy() %>%
+   mutate(across(is.numeric,round,3))%>%
+  arrange(desc(estimate))
+```
+
+```{r}
+options(yardstick.event_first = FALSE)  
+predict(logistic_wf, train, type="prob") %>%
+  bind_cols(predict(logistic_wf, train, type="class")) %>%
+  bind_cols(train)  %>%
+  metrics(event_label, estimate = .pred_class, .pred_1)
+
+predict(logistic_wf, test, type="prob") %>%
+  bind_cols(predict(logistic_wf, test, type="class")) %>%
+  bind_cols(test)  %>%
+  metrics(event_label, estimate = .pred_class, .pred_1)
+
+```
+threshold
+```{r}
+predict(logistic_wf, test, type="prob")%>%
+  bind_cols(test)  %>%
+  pr_curve(event_label, .pred_1) %>%
+  mutate(
+    recall = round(recall, 2),
+    .threshold = round(.threshold, 3),
+    precision = round(precision, 3)
+  ) %>%
+  group_by(recall) %>%
+  summarise(precision = max(precision),
+            .threshold = min(.threshold))%>%
+  mutate(false_positive_rate=round(6134*recall*(1/precision-1)/11849,2))%>%
+  filter(false_positive_rate<=0.08 &false_positive_rate>=0.06)
+
+```
+
+
+```{r}
+logistic_wf %>%
+  pull_workflow_fit() %>%
+  vip()+
+  labs(title="importance of variables in lasso logistic regression model")
+```
+
+
+```{r}
+predict(logistic_wf, train, type="prob") %>%
+  mutate(.pred=as.factor(if_else(.pred_1>=0.395,1,0)))%>%
+  bind_cols(train)  ->logistic_train
+logistic_train%>%
+  metrics(event_label, estimate = .pred, .pred_1)
+
+predict(logistic_wf, test, type="prob") %>%
+  mutate(.pred=as.factor(if_else(.pred_1>=0.395,1,0)))%>%
+  bind_cols(test)   -> logistic_test
+logistic_test%>%
+  metrics(event_label, estimate = .pred, .pred_1)
+```
+
+```{r}
+bind_rows(logistic_train %>%
+  mutate(model = "train"), 
+logistic_test %>%
+  mutate(model = "test")) %>%
+  group_by(model) %>%
+  roc_curve(event_label, .pred_1) %>%
+  autoplot() +
+  geom_vline(xintercept=0.395, color="red") +
+  labs(title = "ROC chart")+
+  labs(title="ROC chart for lasso logistic regression model")
+```
+
+```{r}
+
+
+logistic_train %>%
+  conf_mat(event_label, estimate = .pred) %>%
+  autoplot(type = "heatmap") + labs(title="confusion matrix in train")
+logistic_test %>%
+  conf_mat(event_label, estimate = .pred) %>%
+  autoplot(type = "heatmap") + labs(title="confusion matrix in test")
+
+
+```
+
+```{r}
+logistic_test %>%
+  ggplot(aes(.pred_1, fill=event_label)) +
+  geom_histogram(bins=100) +
+  xlim(0, 1) +
+  geom_vline(aes(xintercept=0.395)) +
+  labs(title="change threshold to 0.395")
+```
+
+
+
+
+
+###ridge
+```{r}
+lg2<- logistic_reg(penalty = 0.001, mixture = 0) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+ridge_wf <- workflow() %>%
+  add_recipe(fraud_recipe) %>%
+  add_model(lg2) %>%
+  fit(train)
+```
+
+```{r}
+options(yardstick.event_first = FALSE)  
+predict(ridge_wf, train, type="prob") %>%
+  bind_cols(predict(ridge_wf, train, type="class")) %>%
+  bind_cols(train)  %>%
+  metrics(event_label, estimate = .pred_class, .pred_1)
+
+predict(ridge_wf, test, type="prob") %>%
+  bind_cols(predict(ridge_wf, test, type="class")) %>%
+  bind_cols(test)  %>%
+  metrics(event_label, estimate = .pred_class, .pred_1)
+```
+
+tuning the threshold
+```{r}
+predict(ridge_wf, train, type="prob")%>%
+  bind_cols(train)  %>%
+  pr_curve(event_label, .pred_1) %>%
+  mutate(
+    recall = round(recall, 3),
+    .threshold = round(.threshold, 3),
+    precision = round(precision, 3)
+  ) %>%
+  group_by(recall) %>%
+  summarise(precision = max(precision),
+            .threshold = min(.threshold))%>%
+  mutate(false_positive_rate=round(6134*recall*(1/precision-1)/11849,2))%>%
+  filter(false_positive_rate==0.06)
+
+```
+##decision tree
+```{r}
+TP = 0
+FP = 3
+TN = 0
+FN = 1
+       
+loss_matr <- matrix(c(TP, FP, FN, TN), nrow = 2, byrow = TRUE)
+loss_matr
+
+tree_spec <- decision_tree(cost_complexity = 0.0, tree_depth=30) %>%
+  set_mode("classification") %>%
+  set_engine("rpart", 
+             parms = list(loss = loss_matr),
+             model=TRUE)
+```
+
+
+```{r}
+tree_wf <- workflow() %>%
+  add_recipe(fraud_recipe) %>%
+  add_model(tree_spec) %>%
+  fit(train)
+```
+
+
+```{r}
+options(yardstick.event_first = FALSE)
+predict(tree_wf, train, type="prob") %>%
+  bind_cols(predict(tree_wf, train, type="class")) %>%
+  bind_cols(train)  %>%
+  metrics(event_label, estimate = .pred_class, .pred_1)
+
+predict(tree_wf, test, type="prob") %>%
+  bind_cols(predict(tree_wf, test, type="class")) %>%
+  bind_cols(test)  %>%
+  metrics(event_label, estimate = .pred_class, .pred_1)
+```
+
+```{r}
+predict(tree_wf, train, type="prob")%>%
+  bind_cols(train)  %>%
+  pr_curve(event_label, .pred_1) %>%
+  mutate(
+    recall = round(recall, 3),
+    .threshold = round(.threshold, 3),
+    precision = round(precision, 3)
+  ) %>%
+  group_by(recall) %>%
+  summarise(precision = max(precision),
+            .threshold = min(.threshold))%>%
+  mutate(false_positive_rate=round(6134*recall*(1/precision-1)/11849,2))%>%
+  filter(false_positive_rate==0.06)
+```
+
+
+##random forest
+```{r}
+forest_spec <-rand_forest(mtry=4, min_n=100, trees=100) %>%
+  set_mode("classification")%>%
+  set_engine("ranger", importance="impurity") 
+```
+
+```{r}
+forest_wf <- workflow() %>%
+  add_recipe(fraud_recipe) %>%
+  add_model(forest_spec) %>%
+  fit(train)
+```
+
+```{r}
+options(yardstick.event_first = FALSE)
+predict(forest_wf, train, type="prob") %>%
+  bind_cols(predict(forest_wf, train, type="class")) %>%
+  bind_cols(train)  %>%
+  metrics(event_label, estimate = .pred_class, .pred_1)
+
+predict(forest_wf, test, type="prob") %>%
+  bind_cols(predict(forest_wf, test, type="class")) %>%
+  bind_cols(test)  %>%
+  metrics(event_label, estimate = .pred_class, .pred_1)
+```
+
+
+```{r}
+predict(forest_wf, test, type="prob")%>%
+  bind_cols(test)  %>%
+  pr_curve(event_label, .pred_1) %>%
+  mutate(
+    recall = round(recall, 2),
+    .threshold = round(.threshold, 3),
+    precision = round(precision, 3)
+  ) %>%
+  group_by(recall) %>%
+  summarise(precision = max(precision),
+            .threshold = min(.threshold))%>%
+  mutate(false_positive_rate=round(6134*recall*(1/precision-1)/11849,2))%>%
+  filter(false_positive_rate==0.06)
+```
+
+###model comparison
+
+```{r}
+predict(logistic_wf, test, type="prob")%>%
+  bind_cols(test)  -> log_test
+
+
+predict(ridge_wf, test, type="prob")%>%
+  bind_cols(test)  -> ridge_test
+
+predict(tree_wf, test, type="prob")%>%
+  bind_cols(test)  -> dt_test
+
+predict(forest_wf, test, type="prob")%>%
+  bind_cols(test)  -> rf_test
+
+
+
+```
+
+
+
+
+```{r}
+bind_rows(log_test %>%mutate(model = "lasso"), ridge_test %>%mutate(model = "ridge"),dt_test %>%mutate(model = "decision tree"),rf_test %>%mutate(model = "random forest")) %>%
+  group_by(model) %>%
+  roc_curve(event_label, .pred_1) %>%
+  autoplot() +
+  labs(title="ROC chart for all models")
+```
+
+
+###kaggle
+```{r}
+fraud_kaggle <-read_csv("project_2_holdout.csv")%>%
+  clean_names()%>%
+  mutate(year=year(event_timestamp),quarter=quarters(event_timestamp),month=month(event_timestamp),day=day(event_timestamp),weekday=weekdays(event_timestamp),hour=hour(event_timestamp))%>%
+  mutate_if(is.character,as.factor)%>%
+  mutate(across(.cols = c("month","year","day","quarter",'weekday','hour','billing_postal','event_id','card_bin'),as.factor))
+
+fraud_kaggle<- left_join(fraud_kaggle,list_email,by="email_domain")%>%
+  mutate(email=as.character(email))%>%
+  mutate(email=if_else(is.na(email),"other",email))%>%
+  mutate(email=as.factor(email))
+
+
+fraud_kaggle<- left_join(fraud_kaggle,list_postal,by="billing_postal")%>%
+  mutate(billing_postal_code=as.character(billing_postal_code))%>%
+  mutate(billing_postal_code=if_else(is.na(billing_postal_code),"other",billing_postal_code))%>%
+  mutate(billing_postal_code=as.factor(billing_postal_code))
+
+
+fraud_kaggle<- left_join(fraud_kaggle,list_ip,by="ip_address")%>%
+  mutate(ip=as.character(ip))%>%
+  mutate(ip=if_else(is.na(ip),"other",ip))%>%
+  mutate(ip=as.factor(ip))
+
+
+predict(forest_wf, fraud_kaggle, type="prob") %>%
+  bind_cols(fraud_kaggle) -> kaggle
+
+kaggle%>%
+  mutate(event_id=as.character(event_id),event_label=.pred_1)%>%
+  subset(select=c(event_id,event_label))%>%
+  mutate(event_id=as.numeric(event_id))%>%
+  write_csv("kaggle_lg.csv")
+  
+
+```
+
+
+
